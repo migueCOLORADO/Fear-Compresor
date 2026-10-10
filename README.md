@@ -27,6 +27,9 @@ Parcial 2 de Sistemas Operativos SO2026B: **compresor/descompresor Huffman concu
 8. [Autores](#autores)
 9. [Información del curso](#información-del-curso)
 
+## Link del Video - Sustentación
+[Video - Sustentación](https://youtu.be/IhznNYRANjY)
+
 ## Categorías preexistentes del shell
 
 El shell educativo (`shell/`, binario `eafitOS`) clasifica sus comandos por categoría. Cada comando muestra en magenta, al estilo de `strace`, la llamada al sistema que ejecuta, sus parámetros y el valor que retorna el kernel (macros `LOG_SYSCALL*` de `shell/shell.h`). Estas cuatro categorías vienen del shell del profesor; el editor (Parte 1) agrega la quinta, `editor`.

@@ -61,6 +61,7 @@ struct HufEditor {
     uint32_t total_bloques;
     uint32_t hechos;
     int ultimo_decimal;           /* último múltiplo de 10% ya impreso */
+    unsigned trabajo;             /* id del trabajo actual (se incrementa en cada c/x) */
     /* Bandera que el motor concurrente lee entre bloques, desde hilos distintos
      * del que la escribe: debe ser ATÓMICA (no 'volatile' leída sin lock, que no
      * garantiza atomicidad entre hilos). Se accede con __atomic_* (orden
@@ -72,6 +73,12 @@ struct HufEditor {
 
     /* --- Serialización de la salida por stdout --- */
     pthread_mutex_t salida_mtx;
+    /* Protegidos por salida_mtx: último porcentaje IMPRESO y el trabajo al que
+     * corresponde. El valor se lee bajo estado_mtx pero se imprime después, bajo
+     * salida_mtx; sin esto, un 't' con una lectura vieja podía imprimirse detrás
+     * de un '[huf] N %' más nuevo y el porcentaje mostrado retrocedía. */
+    unsigned trabajo_mostrado;
+    int pct_mostrado;
 };
 
 #define ES_COMPRESION(he) ((he)->es_compresion)
@@ -87,6 +94,20 @@ static void he_printf(HufEditor *he, const char *fmt, ...) {
     va_end(ap);
     fflush(stdout);
     pthread_mutex_unlock(&he->salida_mtx);
+}
+
+/* Ajusta 'pct' para que lo impreso de un mismo trabajo nunca retroceda. Se llama
+ * con salida_mtx tomado, en la misma sección crítica que imprime la línea. */
+static int pct_monotono(HufEditor *he, unsigned trabajo, int pct) {
+    if (trabajo != he->trabajo_mostrado) {
+        he->trabajo_mostrado = trabajo;
+        he->pct_mostrado = 0;
+    }
+    if (pct < he->pct_mostrado) {
+        return he->pct_mostrado;
+    }
+    he->pct_mostrado = pct;
+    return pct;
 }
 
 /* Diagnóstico a stderr con vfprintf (no fprintf con literal) para no importar el
@@ -119,10 +140,16 @@ static void cb_progreso(uint32_t hechos, uint32_t total, void *dato) {
     int imprimir = 0;
     int decimal = 0;
     pthread_mutex_lock(&he->estado_mtx);
-    he->hechos = hechos;
-    he->total_bloques = total;
-    if (total > 0) {
-        int pct = (int)((uint64_t)hechos * 100 / total);
+    /* Los workers incrementan su contador bajo su propio mutex pero llaman a este
+     * callback DESPUÉS de soltarlo, así que dos llamadas pueden llegar en orden
+     * inverso (h=5 antes que h=4). Solo se acepta un avance para que el progreso
+     * guardado nunca retroceda. */
+    if (total != he->total_bloques || hechos > he->hechos) {
+        he->hechos = hechos;
+        he->total_bloques = total;
+    }
+    if (he->total_bloques > 0) {
+        int pct = (int)((uint64_t)he->hechos * 100 / he->total_bloques);
         decimal = pct / 10 * 10;
         if (decimal > he->ultimo_decimal && decimal < 100) {
             he->ultimo_decimal = decimal;
@@ -132,11 +159,18 @@ static void cb_progreso(uint32_t hechos, uint32_t total, void *dato) {
     pthread_cond_broadcast(&he->estado_cv);
     int es_comp = ES_COMPRESION(he);
     char *ruta = he->ruta_in;
+    unsigned trabajo = he->trabajo;
     pthread_mutex_unlock(&he->estado_mtx);
 
     if (imprimir) {
-        he_printf(he, "\n" COLOR_INFO "[huf] %d %% (%s %s)" COLOR_RESET "\n",
-                  decimal, es_comp ? "comprimiendo" : "descomprimiendo", ruta ? ruta : "");
+        pthread_mutex_lock(&he->salida_mtx);
+        /* Si un 't' ya mostró un valor mayor, este hito llegó tarde: se omite. */
+        if (pct_monotono(he, trabajo, decimal) == decimal) {
+            printf("\n" COLOR_INFO "[huf] %d %% (%s %s)" COLOR_RESET "\n",
+                   decimal, es_comp ? "comprimiendo" : "descomprimiendo", ruta ? ruta : "");
+            fflush(stdout);
+        }
+        pthread_mutex_unlock(&he->salida_mtx);
     }
 }
 
@@ -288,6 +322,7 @@ static int lanzar(HufEditor *he, int es_compresion, const char *in, const char *
     he->hechos = 0;
     he->total_bloques = 0;
     he->ultimo_decimal = 0;
+    he->trabajo++;
 
     int rc = pthread_create(&he->orq, NULL, orquestador, he);
     if (rc != 0) {
@@ -320,19 +355,22 @@ void he_estado_imprimir(HufEditor *he) {
     uint32_t hechos = he->hechos, total = he->total_bloques;
     int es_comp = ES_COMPRESION(he);
     char *in = he->ruta_in ? strdup(he->ruta_in) : NULL;
+    unsigned trabajo = he->trabajo;
     pthread_mutex_unlock(&he->estado_mtx);
 
     int pct = total > 0 ? (int)((uint64_t)hechos * 100 / total) : (e == HE_DONE ? 100 : 0);
     if (e == HE_IDLE) {
         he_printf(he, COLOR_INFO "[huf] estado: ninguno" COLOR_RESET "\n");
-    } else if (e == HE_RUNNING || e == HE_CANCELLING) {
-        he_printf(he, COLOR_INFO "[huf] estado: %s (%s %s) %d %%" COLOR_RESET "\n",
-                  nombre_estado(e), es_comp ? "comprimiendo" : "descomprimiendo",
-                  in ? in : "", pct);
     } else {
-        he_printf(he, COLOR_INFO "[huf] estado: %s (%s %s) %d %%" COLOR_RESET "\n",
-                  nombre_estado(e), es_comp ? "compresión" : "descompresión",
-                  in ? in : "", pct);
+        int activo = (e == HE_RUNNING || e == HE_CANCELLING);
+        const char *accion = activo ? (es_comp ? "comprimiendo" : "descomprimiendo")
+                                    : (es_comp ? "compresión" : "descompresión");
+        pthread_mutex_lock(&he->salida_mtx);
+        pct = pct_monotono(he, trabajo, pct);
+        printf(COLOR_INFO "[huf] estado: %s (%s %s) %d %%" COLOR_RESET "\n",
+               nombre_estado(e), accion, in ? in : "", pct);
+        fflush(stdout);
+        pthread_mutex_unlock(&he->salida_mtx);
     }
     free(in);
 }

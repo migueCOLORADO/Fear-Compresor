@@ -14,6 +14,15 @@
 # =====================================================================================
 set -u
 
+# ThreadSanitizer de GCC 13 aborta al arrancar ("FATAL: ThreadSanitizer:
+# unexpected memory mapping") en kernels con alta entropía de ASLR (6.x). Para
+# que los binarios *_tsan realmente se ejecuten, la suite se re-lanza una vez con
+# la aleatorización de direcciones desactivada; los hijos heredan la personalidad.
+if [ -z "${HUF_SIN_ASLR:-}" ] && command -v setarch >/dev/null 2>&1; then
+    export HUF_SIN_ASLR=1
+    exec setarch "$(uname -m)" -R bash "$0" "$@"
+fi
+
 DIR_ED="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$DIR_ED/tests/tmp_huf"
 CLI="${HUF_CLI:-$DIR_ED/huf_cli}"
@@ -110,7 +119,7 @@ ED_LENTO_TSAN="$DIR_ED/editor_lento_tsan"
 base_intacto() { [ "$(huella "$1")" = "$2" ]; }
 
 # ¿La salida contiene un reporte de ThreadSanitizer? (solo relevante en modo tsan)
-hay_tsan() { echo "$1" | grep -q "WARNING: ThreadSanitizer"; }
+hay_tsan() { echo "$1" | grep -qE "WARNING: ThreadSanitizer|FATAL: ThreadSanitizer"; }
 
 # Sección 2 parametrizada: $1 = binario del editor, $2 = etiqueta (""/"[tsan] ").
 seccion2_carreras() {

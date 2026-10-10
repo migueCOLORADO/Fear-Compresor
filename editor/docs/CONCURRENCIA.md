@@ -258,6 +258,14 @@ motor), nunca `ed->fd`; y la salida de `x` nunca puede ser el archivo abierto
   nunca muestre un porcentaje que baje, se reporta sobre un total de `2*nbloques`
   (conteo = primeras `nbloques` unidades, 0–50%; codificación = segundas,
   50–100%). La descompresión es una sola fase, 0–100%.
+  Dos detalles garantizan que lo **mostrado** no retroceda: (1) los workers del
+  conteo y de la descompresión llaman al callback de progreso después de soltar
+  su mutex, así que dos avisos pueden llegar invertidos; `cb_progreso` solo acepta
+  un valor mayor que el guardado. (2) El valor se lee bajo `estado_mtx` pero se
+  imprime bajo `salida_mtx`; `pct_monotono` (con `salida_mtx` tomado, en la misma
+  sección crítica que imprime) nunca deja imprimir un porcentaje menor al último
+  impreso del mismo trabajo. Sin esto, la prueba de progreso monótono de la
+  descompresión fallaba de forma intermitente.
 
 ## 9. Diez preguntas de sustentación (con respuesta fundamentada en el código)
 
@@ -320,4 +328,29 @@ motor), nunca `ed->fd`; y la salida de `x` nunca puede ser el archivo abierto
     atómico en el mismo sistema de archivos. Ante error o cancelación se hace
     `unlink(tmp)`. Además la descompresión usa `O_EXCL` para no sobrescribir en
     silencio un archivo existente.
+
+## 10. Evidencia: secuencial vs concurrente
+
+Medición en WSL2 Ubuntu 24.04, GCC 13.3.0, 12 CPUs lógicas. Entrada de 64 MiB
+(67 108 864 bytes): 16 tramos de 3 MiB de texto repetido + 1 MiB de bytes
+aleatorios. Compresión con el CLI de pruebas (`make huf_cli`), bloque de 64 KiB,
+tiempo real de 3 corridas por modo:
+
+| Modo | Comando | Corridas (s) | Mediana (s) | Speedup |
+|------|---------|--------------|-------------|---------|
+| Secuencial (`huf_comprimir_archivo`) | `./huf_cli c in.bin o.huf` | 2.060, 2.094, 2.003 | 2.060 | 1.00x |
+| Concurrente, pool de 1 hilo | `./huf_cli C in.bin o.huf 1` | 1.997, 2.040, 2.029 | 2.029 | 1.02x |
+| Concurrente, pool automático (8 hilos) | `./huf_cli C in.bin o.huf 0` | 0.489, 0.481, 0.524 | 0.489 | 4.21x |
+
+Integridad de la ida y vuelta sobre el mismo archivo (SHA-256 idéntico):
+
 ```
+36c774f7acbf85c34db808c633704fc6e03aadc7a022fc40490f4e1bb2e290eb  in.bin
+36c774f7acbf85c34db808c633704fc6e03aadc7a022fc40490f4e1bb2e290eb  par.rt   (C + X, concurrente)
+36c774f7acbf85c34db808c633704fc6e03aadc7a022fc40490f4e1bb2e290eb  seq.rt   (c + x, secuencial)
+```
+
+Ambas versiones producen un `.huf` de 50 454 489 bytes. Con 1 hilo el pool
+cuesta lo mismo que la versión secuencial, así que la sincronización agrega poco;
+la ganancia viene del paralelismo real. La sección 6 de `tests/run_tests_huf.sh`
+repite una medición más chica (N = 1, 2, 4, 8) en cada corrida de `make test-huf`.

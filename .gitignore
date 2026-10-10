@@ -1,0 +1,14 @@
+shell/*.o
+shell/sys_shell
+editor/*.o
+editor/editor
+editor/editor_asan
+editor/tests/tmp/
+shell/eafitOS
+editor/editor_tsan
+editor/editor_lento
+editor/editor_lento_tsan
+editor/huf_cli
+editor/huf_cli_asan
+editor/huf_cli_tsan
+editor/tests/tmp_huf/
